@@ -183,11 +183,11 @@ void FTPHTTPProxy::file_transfer_task(void* param) {
   int ftp_sock = -1;
   int data_sock = -1;
   bool success = false;
-  int bytes_received = 0;  // Déclaration déplacée vers le début de la fonction
+  int bytes_received = 0; // Déclaration unique au début
 
   // Allocation du buffer avec PSRAM si disponible
   bool has_psram = heap_caps_get_free_size(MALLOC_CAP_SPIRAM) > 0;
-  const int buffer_size = 8192;  // Taille optimisée pour l'ESP32-S3
+  const int buffer_size = 8192; // Taille optimisée pour l'ESP32-S3
   char* buffer = nullptr;
   
   if (has_psram) {
@@ -253,13 +253,20 @@ void FTPHTTPProxy::file_transfer_task(void* param) {
     httpd_resp_set_hdr(ctx->req, "Accept-Ranges", "bytes");
   }
 
-  // Mode passif
-  send(ftp_sock, "PASV\r\n", 6, 0);
-  int bytes_received = recv(ftp_sock, buffer, buffer_size - 1, 0);
-  if (bytes_received <= 0 || !strstr(buffer, "227 ")) {
-    ESP_LOGE(TAG, "Erreur en mode passif");
-    goto end_transfer;
-  }
+   // Mode passif
+   send(ftp_sock, "PASV\r\n", 6, 0);
+   bytes_received = recv(ftp_sock, buffer, buffer_size - 1, 0); // Réutilisation de la variable existante
+   if (bytes_received <= 0 || !strstr(buffer, "227 ")) {
+     ESP_LOGE(TAG, "Erreur en mode passif");
+     goto end_transfer;
+   }
+
+end_transfer:
+   if (buffer) free(buffer); // Libération du buffer
+   if (ftp_sock != -1) close(ftp_sock); // Fermeture du socket FTP
+   vTaskDelete(NULL); // Suppression de la tâche
+}
+
   buffer[bytes_received] = '\0';
 
   // Analyse de la réponse PASV
