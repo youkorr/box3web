@@ -169,103 +169,103 @@ bool FTPHTTPProxy::connect_to_ftp(int& sock, const char* server, const char* use
 }
 
 /* Cette fonction exécute le transfert de fichier dans une tâche séparée */
-void FTPHTTPProxy::file_transfer_task(void* param) {
-  FileTransferContext* ctx = (FileTransferContext*)param;
-  if (!ctx) {
-    ESP_LOGE(TAG, "Contexte de transfert invalide");
-    vTaskDelete(NULL);
-    return;
-  }
-  
-  ESP_LOGI(TAG, "Démarrage du transfert pour %s", ctx->remote_path.c_str());
-  
-  FTPHTTPProxy proxy_instance;
-  int ftp_sock = -1;
-  int data_sock = -1;
-  bool success = false;
-  int bytes_received = 0; // Déclaration unique au début
-
-  // Allocation du buffer avec PSRAM si disponible
-  bool has_psram = heap_caps_get_free_size(MALLOC_CAP_SPIRAM) > 0;
-  const int buffer_size = 8192; // Taille optimisée pour l'ESP32-S3
-  char* buffer = nullptr;
-  
-  if (has_psram) {
-    buffer = (char*)heap_caps_malloc(buffer_size, MALLOC_CAP_SPIRAM);
-    ESP_LOGI(TAG, "Utilisation de la PSRAM pour le buffer");
-  } else {
-    buffer = (char*)malloc(buffer_size);
-    ESP_LOGI(TAG, "PSRAM non disponible, utilisation de la RAM standard");
-  }
-  
-  if (!buffer) {
-    ESP_LOGE(TAG, "Échec d'allocation pour le buffer");
-    goto end_transfer;
-  }
-
-  // Connexion au serveur FTP
-  if (!proxy_instance.connect_to_ftp(ftp_sock, ctx->ftp_server.c_str(), ctx->username.c_str(), ctx->password.c_str())) {
-    ESP_LOGE(TAG, "Échec de connexion FTP");
-    goto end_transfer;
-  }
-
-  // Configuration des headers HTTP
-  {
-    std::string extension = "";
-    size_t dot_pos = ctx->remote_path.find_last_of('.');
-    if (dot_pos != std::string::npos) {
-      extension = ctx->remote_path.substr(dot_pos);
-      std::transform(extension.begin(), extension.end(), extension.begin(), 
-                     [](unsigned char c){ return std::tolower(c); });
-    }
-
-    // Configuration du type MIME
-    if (extension == ".mp3") {
-      httpd_resp_set_type(ctx->req, "audio/mpeg");
-    } else if (extension == ".wav") {
-      httpd_resp_set_type(ctx->req, "audio/wav");
-    } else if (extension == ".ogg") {
-      httpd_resp_set_type(ctx->req, "audio/ogg");
-    } else if (extension == ".mp4") {
-      httpd_resp_set_type(ctx->req, "video/mp4");
-    } else if (extension == ".pdf") {
-      httpd_resp_set_type(ctx->req, "application/pdf");
-    } else if (extension == ".jpg" || extension == ".jpeg") {
-      httpd_resp_set_type(ctx->req, "image/jpeg");
-    } else if (extension == ".png") {
-      httpd_resp_set_type(ctx->req, "image/png");
-    } else {
-      // Type par défaut pour les fichiers inconnus
-      httpd_resp_set_type(ctx->req, "application/octet-stream");
-      
-      // Extraire le nom du fichier pour Content-Disposition
-      std::string filename = ctx->remote_path;
-      size_t slash_pos = ctx->remote_path.find_last_of('/');
-      if (slash_pos != std::string::npos) {
-        filename = ctx->remote_path.substr(slash_pos + 1);
-      }
-      
-      std::string header = "attachment; filename=\"" + filename + "\"";
-      httpd_resp_set_hdr(ctx->req, "Content-Disposition", header.c_str());
+  void FTPHTTPProxy::file_transfer_task(void* param) {
+    FileTransferContext* ctx = (FileTransferContext*)param;
+    if (!ctx) {
+      ESP_LOGE(TAG, "Contexte de transfert invalide");
+      vTaskDelete(NULL);
+      return;
     }
     
-    // En-têtes pour permettre la mise en cache et les requêtes par plage
-    httpd_resp_set_hdr(ctx->req, "Accept-Ranges", "bytes");
+    ESP_LOGI(TAG, "Démarrage du transfert pour %s", ctx->remote_path.c_str());
+    
+    FTPHTTPProxy proxy_instance;
+    int ftp_sock = -1;
+    int data_sock = -1;
+    bool success = false;
+    int bytes_received = 0; // Déclaration unique au début
+  
+    // Allocation du buffer avec PSRAM si disponible
+    bool has_psram = heap_caps_get_free_size(MALLOC_CAP_SPIRAM) > 0;
+    const int buffer_size = 8192; // Taille optimisée pour l'ESP32-S3
+    char* buffer = nullptr;
+    
+    if (has_psram) {
+      buffer = (char*)heap_caps_malloc(buffer_size, MALLOC_CAP_SPIRAM);
+      ESP_LOGI(TAG, "Utilisation de la PSRAM pour le buffer");
+    } else {
+      buffer = (char*)malloc(buffer_size);
+      ESP_LOGI(TAG, "PSRAM non disponible, utilisation de la RAM standard");
+    }
+    
+    if (!buffer) {
+      ESP_LOGE(TAG, "Échec d'allocation pour le buffer");
+      goto end_transfer;
+    }
+  
+    // Connexion au serveur FTP
+    if (!proxy_instance.connect_to_ftp(ftp_sock, ctx->ftp_server.c_str(), ctx->username.c_str(), ctx->password.c_str())) {
+      ESP_LOGE(TAG, "Échec de connexion FTP");
+      goto end_transfer;
+    }
+  
+    // Configuration des headers HTTP
+    {
+      std::string extension = "";
+      size_t dot_pos = ctx->remote_path.find_last_of('.');
+      if (dot_pos != std::string::npos) {
+        extension = ctx->remote_path.substr(dot_pos);
+        std::transform(extension.begin(), extension.end(), extension.begin(), 
+                       [](unsigned char c){ return std::tolower(c); });
+      }
+  
+      // Configuration du type MIME
+      if (extension == ".mp3") {
+        httpd_resp_set_type(ctx->req, "audio/mpeg");
+      } else if (extension == ".wav") {
+        httpd_resp_set_type(ctx->req, "audio/wav");
+      } else if (extension == ".ogg") {
+        httpd_resp_set_type(ctx->req, "audio/ogg");
+      } else if (extension == ".mp4") {
+        httpd_resp_set_type(ctx->req, "video/mp4");
+      } else if (extension == ".pdf") {
+        httpd_resp_set_type(ctx->req, "application/pdf");
+      } else if (extension == ".jpg" || extension == ".jpeg") {
+        httpd_resp_set_type(ctx->req, "image/jpeg");
+      } else if (extension == ".png") {
+        httpd_resp_set_type(ctx->req, "image/png");
+      } else {
+        // Type par défaut pour les fichiers inconnus
+        httpd_resp_set_type(ctx->req, "application/octet-stream");
+        
+        // Extraire le nom du fichier pour Content-Disposition
+        std::string filename = ctx->remote_path;
+        size_t slash_pos = ctx->remote_path.find_last_of('/');
+        if (slash_pos != std::string::npos) {
+          filename = ctx->remote_path.substr(slash_pos + 1);
+        }
+        
+        std::string header = "attachment; filename=\"" + filename + "\"";
+        httpd_resp_set_hdr(ctx->req, "Content-Disposition", header.c_str());
+      }
+      
+      // En-têtes pour permettre la mise en cache et les requêtes par plage
+      httpd_resp_set_hdr(ctx->req, "Accept-Ranges", "bytes");
+    }
+  
+     // Mode passif
+     send(ftp_sock, "PASV\r\n", 6, 0);
+     bytes_received = recv(ftp_sock, buffer, buffer_size - 1, 0); // Réutilisation de la variable existante
+     if (bytes_received <= 0 || !strstr(buffer, "227 ")) {
+       ESP_LOGE(TAG, "Erreur en mode passif");
+       goto end_transfer;
+     }
+  
+  end_transfer:
+     if (buffer) free(buffer); // Libération du buffer
+     if (ftp_sock != -1) close(ftp_sock); // Fermeture du socket FTP
+     vTaskDelete(NULL); // Suppression de la tâche
   }
-
-   // Mode passif
-   send(ftp_sock, "PASV\r\n", 6, 0);
-   bytes_received = recv(ftp_sock, buffer, buffer_size - 1, 0); // Réutilisation de la variable existante
-   if (bytes_received <= 0 || !strstr(buffer, "227 ")) {
-     ESP_LOGE(TAG, "Erreur en mode passif");
-     goto end_transfer;
-   }
-
-end_transfer:
-   if (buffer) free(buffer); // Libération du buffer
-   if (ftp_sock != -1) close(ftp_sock); // Fermeture du socket FTP
-   vTaskDelete(NULL); // Suppression de la tâche
-}
 
   buffer[bytes_received] = '\0';
 
