@@ -1,3 +1,4 @@
+#include "esp_wifi.h"
 #include "ftp_http_proxy.h"
 #include "web.h"
 #include "esphome/core/log.h"
@@ -14,7 +15,6 @@
 #include <string>
 #include "esp_timer.h"
 #include "esp_check.h"
-#include "esp_wifi.h"
 
 #ifndef HTTPD_410_GONE
 #define HTTPD_410_GONE ((httpd_err_code_t)410)
@@ -151,8 +151,7 @@ bool FTPHTTPProxy::connect_to_ftp(int& sock, const char* server, const char* use
   return true;
 }
 
-// Modifications principales à la fonction file_transfer_task
-
+// Fonction file_transfer_task modifiée avec les améliorations demandées
 void FTPHTTPProxy::file_transfer_task(void* param) {
   FileTransferContext* ctx = (FileTransferContext*)param;
   if (!ctx) {
@@ -160,6 +159,9 @@ void FTPHTTPProxy::file_transfer_task(void* param) {
     vTaskDelete(NULL);
     return;
   }
+  
+  // S'inscrire au watchdog
+  esp_task_wdt_add(NULL);
   
   ESP_LOGI(TAG, "Démarrage du transfert pour %s", ctx->remote_path.c_str());
   
@@ -187,6 +189,7 @@ void FTPHTTPProxy::file_transfer_task(void* param) {
       ESP_LOGE(TAG, "Échec d'allocation pour le buffer");
       httpd_resp_send_err(ctx->req, HTTPD_500_INTERNAL_SERVER_ERROR, "Erreur de transfert de fichier");
       delete ctx;
+      esp_task_wdt_delete(NULL);  // Se désinscrire du watchdog
       vTaskDelete(NULL);
       return;
     }
@@ -198,6 +201,7 @@ void FTPHTTPProxy::file_transfer_task(void* param) {
     free(buffer);
     httpd_resp_send_err(ctx->req, HTTPD_500_INTERNAL_SERVER_ERROR, "Erreur de transfert de fichier");
     delete ctx;
+    esp_task_wdt_delete(NULL);  // Se désinscrire du watchdog
     vTaskDelete(NULL);
     return;
   }
@@ -237,6 +241,9 @@ void FTPHTTPProxy::file_transfer_task(void* param) {
     std::string header = "attachment; filename=\"" + filename + "\"";
     httpd_resp_set_hdr(ctx->req, "Content-Disposition", header.c_str());
   }
+  
+  // Activer explicitement le mode chunked
+  httpd_resp_set_hdr(ctx->req, "Transfer-Encoding", "chunked");
 
   // Passer en mode passif et récupérer les paramètres de connexion de données
   send(ftp_sock, "PASV\r\n", 6, 0);
@@ -247,6 +254,7 @@ void FTPHTTPProxy::file_transfer_task(void* param) {
     close(ftp_sock);
     httpd_resp_send_err(ctx->req, HTTPD_500_INTERNAL_SERVER_ERROR, "Erreur de transfert de fichier");
     delete ctx;
+    esp_task_wdt_delete(NULL);  // Se désinscrire du watchdog
     vTaskDelete(NULL);
     return;
   }
@@ -259,6 +267,7 @@ void FTPHTTPProxy::file_transfer_task(void* param) {
     close(ftp_sock);
     httpd_resp_send_err(ctx->req, HTTPD_500_INTERNAL_SERVER_ERROR, "Erreur de transfert de fichier");
     delete ctx;
+    esp_task_wdt_delete(NULL);  // Se désinscrire du watchdog
     vTaskDelete(NULL);
     return;
   }
@@ -270,6 +279,7 @@ void FTPHTTPProxy::file_transfer_task(void* param) {
     close(ftp_sock);
     httpd_resp_send_err(ctx->req, HTTPD_500_INTERNAL_SERVER_ERROR, "Erreur de transfert de fichier");
     delete ctx;
+    esp_task_wdt_delete(NULL);  // Se désinscrire du watchdog
     vTaskDelete(NULL);
     return;
   }
@@ -281,6 +291,7 @@ void FTPHTTPProxy::file_transfer_task(void* param) {
     close(ftp_sock);
     httpd_resp_send_err(ctx->req, HTTPD_500_INTERNAL_SERVER_ERROR, "Erreur de transfert de fichier");
     delete ctx;
+    esp_task_wdt_delete(NULL);  // Se désinscrire du watchdog
     vTaskDelete(NULL);
     return;
   }
@@ -294,6 +305,7 @@ void FTPHTTPProxy::file_transfer_task(void* param) {
     close(ftp_sock);
     httpd_resp_send_err(ctx->req, HTTPD_500_INTERNAL_SERVER_ERROR, "Erreur de transfert de fichier");
     delete ctx;
+    esp_task_wdt_delete(NULL);  // Se désinscrire du watchdog
     vTaskDelete(NULL);
     return;
   }
@@ -322,6 +334,7 @@ void FTPHTTPProxy::file_transfer_task(void* param) {
     close(ftp_sock);
     httpd_resp_send_err(ctx->req, HTTPD_500_INTERNAL_SERVER_ERROR, "Erreur de transfert de fichier");
     delete ctx;
+    esp_task_wdt_delete(NULL);  // Se désinscrire du watchdog
     vTaskDelete(NULL);
     return;
   }
@@ -334,6 +347,7 @@ void FTPHTTPProxy::file_transfer_task(void* param) {
     close(ftp_sock);
     httpd_resp_send_err(ctx->req, HTTPD_404_NOT_FOUND, "Fichier non spécifié");
     delete ctx;
+    esp_task_wdt_delete(NULL);  // Se désinscrire du watchdog
     vTaskDelete(NULL);
     return;
   }
@@ -347,6 +361,7 @@ void FTPHTTPProxy::file_transfer_task(void* param) {
     close(ftp_sock);
     httpd_resp_send_err(ctx->req, HTTPD_500_INTERNAL_SERVER_ERROR, "Erreur de transfert de fichier");
     delete ctx;
+    esp_task_wdt_delete(NULL);  // Se désinscrire du watchdog
     vTaskDelete(NULL);
     return;
   }
@@ -360,6 +375,7 @@ void FTPHTTPProxy::file_transfer_task(void* param) {
     close(ftp_sock);
     httpd_resp_send_err(ctx->req, HTTPD_500_INTERNAL_SERVER_ERROR, "Erreur de transfert de fichier");
     delete ctx;
+    esp_task_wdt_delete(NULL);  // Se désinscrire du watchdog
     vTaskDelete(NULL);
     return;
   }
@@ -373,6 +389,7 @@ void FTPHTTPProxy::file_transfer_task(void* param) {
     close(ftp_sock);
     httpd_resp_send_err(ctx->req, HTTPD_404_NOT_FOUND, "Fichier non trouvé ou inaccessible");
     delete ctx;
+    esp_task_wdt_delete(NULL);  // Se désinscrire du watchdog
     vTaskDelete(NULL);
     return;
   }
@@ -383,7 +400,13 @@ void FTPHTTPProxy::file_transfer_task(void* param) {
   size_t total_bytes_transferred = 0;
   esp_err_t err = ESP_OK;
   
+  // Définir la taille des chunks plus petite pour les gros fichiers
+  const int chunk_size = 4096;  // Plus petit que buffer_size
+  
   while (true) {
+    // Réinitialiser le watchdog régulièrement
+    esp_task_wdt_reset();
+    
     bytes_received = recv(data_sock, buffer, buffer_size, 0);
     if (bytes_received <= 0) {
       if (bytes_received < 0 && errno != EAGAIN && errno != EWOULDBLOCK) {
@@ -394,23 +417,37 @@ void FTPHTTPProxy::file_transfer_task(void* param) {
     
     total_bytes_transferred += bytes_received;
     
-    // Ajout d'une vérification de mémoire disponible 
-    if (esp_get_free_heap_size() < 10000) {
-      ESP_LOGW(TAG, "Mémoire faible: %d octets", esp_get_free_heap_size());
-      vTaskDelay(pdMS_TO_TICKS(10)); // Pause pour donner du temps au système
+    // Vérification de la mémoire disponible avec un seuil plus élevé
+    if (esp_get_free_heap_size() < 15000) {
+      ESP_LOGW(TAG, "Mémoire critique: %d octets", esp_get_free_heap_size());
+      vTaskDelay(pdMS_TO_TICKS(50));  // Pause plus longue
     }
     
-    err = httpd_resp_send_chunk(ctx->req, buffer, bytes_received);
+    // Envoyer en petits chunks au lieu d'un gros
+    if (bytes_received > chunk_size) {
+      for (int i = 0; i < bytes_received; i += chunk_size) {
+        int current_chunk = std::min(chunk_size, bytes_received - i);
+        err = httpd_resp_send_chunk(ctx->req, buffer + i, current_chunk);
+        if (err != ESP_OK) {
+          ESP_LOGE(TAG, "Échec d'envoi du chunk: %s", esp_err_to_name(err));
+          break;
+        }
+        vTaskDelay(pdMS_TO_TICKS(5));  // Petit délai entre les chunks
+      }
+    } else {
+      err = httpd_resp_send_chunk(ctx->req, buffer, bytes_received);
+    }
+    
     if (err != ESP_OK) {
       ESP_LOGE(TAG, "Échec d'envoi au client: %s", esp_err_to_name(err));
       break;
     }
     
-    if (total_bytes_transferred % (512 * 1024) == 0) {
+    // Après un certain volume de données, afficher le progrès et réinitialiser le watchdog
+    if (total_bytes_transferred % (256 * 1024) == 0) {
       ESP_LOGI(TAG, "Transfert en cours: %.2f MB", total_bytes_transferred / (1024.0 * 1024.0));
-      
-      // Délai périodique pour donner du temps à la tâche de surveillance
-      vTaskDelay(pdMS_TO_TICKS(2));
+      esp_task_wdt_reset();  // Réinitialiser le watchdog
+      vTaskDelay(pdMS_TO_TICKS(5));  // Petit délai
     }
   }
   
@@ -460,10 +497,13 @@ void FTPHTTPProxy::file_transfer_task(void* param) {
     ctx = nullptr;
   }
   
+  // Se désinscrire du watchdog avant de terminer
+  esp_task_wdt_delete(NULL);
+  
   vTaskDelete(NULL);
 }
 
-bool FTPHTTPProxy::list_ftp_directory(const std::string &remote_dir, httpd_req_t *req) {
+bool FTPHTTPProxy::list_ftp_directory(const std::string &dir_path, httpd_req_t *req) {
   int ftp_sock = -1;
   int data_sock = -1;
   char buffer[1024];
@@ -514,7 +554,11 @@ bool FTPHTTPProxy::list_ftp_directory(const std::string &remote_dir, httpd_req_t
   memset(&data_addr, 0, sizeof(data_addr));
   data_addr.sin_family = AF_INET;
   data_addr.sin_port = htons(data_port);
-  data_addr.sin_addr.s_addr = htonl((ip[0] << 24) | (ip[1] << 16) | (ip[2] << 8) | ip[3]);
+  
+  // Corriger la connexion au port de données en utilisant inet_addr
+  char ip_str[16];
+  snprintf(ip_str, sizeof(ip_str), "%d.%d.%d.%d", ip[0], ip[1], ip[2], ip[3]);
+  data_addr.sin_addr.s_addr = inet_addr(ip_str);
   
   if (connect(data_sock, (struct sockaddr *)&data_addr, sizeof(data_addr)) != 0) {
     close(ftp_sock);
@@ -524,10 +568,10 @@ bool FTPHTTPProxy::list_ftp_directory(const std::string &remote_dir, httpd_req_t
     return false;
   }
   
-  if (remote_dir.empty()) {
+  if (dir_path.empty()) {
     send(ftp_sock, "LIST\r\n", 6, 0);
   } else {
-    snprintf(buffer, sizeof(buffer), "LIST %s\r\n", remote_dir.c_str());
+    snprintf(buffer, sizeof(buffer), "LIST %s\r\n", dir_path.c_str());
     send(ftp_sock, buffer, strlen(buffer), 0);
   }
   
@@ -559,7 +603,6 @@ bool FTPHTTPProxy::list_ftp_directory(const std::string &remote_dir, httpd_req_t
         sscanf(line, "%10s %*s %*s %*s %lu %*s %*s %255s", perms, &size, filename) >= 2) {
       
       if (strcmp(filename, ".") != 0 && strcmp(filename, "..") != 0) {
-        bool is_dir = (perms[0] == 'd');
         bool known_file = false;
         bool is_shareable = false;
         
@@ -579,14 +622,23 @@ bool FTPHTTPProxy::list_ftp_directory(const std::string &remote_dir, httpd_req_t
         }
         
         if (!first_file) file_list += ",";
-        first_file = false;
-        
-        file_list += "{\"name\":\"" + std::string(filename) + "\",";
-        file_list += "\"path\":\"" + std::string(filename) + "\",";
-        file_list += "\"type\":\"" + std::string(is_dir ? "directory" : "file") + "\",";
-        file_list += "\"size\":" + std::to_string(size) + ",";
-        file_list += "\"shareable\":" + std::string(is_shareable ? "true" : "false") + "}";
-      }
+        first_file = false; 
+      // Corriger la détection des répertoires
+        if (perms[0] == 'd') {
+          // C'est un répertoire
+          file_list += "{\"name\":\"" + std::string(filename) + "\",";
+          file_list += "\"path\":\"" + (dir_path.empty() ? "" : dir_path + "/") + std::string(filename) + "\",";
+          file_list += "\"type\":\"directory\",";
+          file_list += "\"size\":0,";
+          file_list += "\"shareable\":false}";
+        } else {
+          // C'est un fichier
+          file_list += "{\"name\":\"" + std::string(filename) + "\",";
+          file_list += "\"path\":\"" + (dir_path.empty() ? "" : dir_path + "/") + std::string(filename) + "\",";
+          file_list += "\"type\":\"file\",";
+          file_list += "\"size\":" + std::to_string(size) + ",";
+          file_list += "\"shareable\":" + std::string(is_shareable ? "true" : "false") + "}";
+        }
     }
     
     line = strtok_r(NULL, "\r\n", &saveptr);
