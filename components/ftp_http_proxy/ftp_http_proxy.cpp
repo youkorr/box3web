@@ -173,13 +173,20 @@ void FTPHTTPProxy::file_transfer_task(void* param) {
     buffer = (char*)malloc(buffer_size);
     if (!buffer) {
       ESP_LOGE(TAG, "Échec d'allocation pour le buffer");
-      goto end_transfer;
+      httpd_resp_send_err(ctx->req, HTTPD_500_INTERNAL_SERVER_ERROR, "Erreur de transfert de fichier");
+      delete ctx;
+      vTaskDelete(NULL);
+      return;
     }
   }
 
   if (!proxy_instance.connect_to_ftp(ftp_sock, ctx->ftp_server.c_str(), ctx->username.c_str(), ctx->password.c_str())) {
     ESP_LOGE(TAG, "Échec de connexion FTP");
-    goto end_transfer;
+    free(buffer);
+    httpd_resp_send_err(ctx->req, HTTPD_500_INTERNAL_SERVER_ERROR, "Erreur de transfert de fichier");
+    delete ctx;
+    vTaskDelete(NULL);
+    return;
   }
 
   std::string extension;
@@ -219,14 +226,26 @@ void FTPHTTPProxy::file_transfer_task(void* param) {
   bytes_received = recv(ftp_sock, buffer, buffer_size - 1, 0);
   if (bytes_received <= 0 || !strstr(buffer, "227 ")) {
     ESP_LOGE(TAG, "Erreur en mode passif");
-    goto end_transfer;
+    // Clean up and exit
+    free(buffer);
+    close(ftp_sock);
+    httpd_resp_send_err(ctx->req, HTTPD_500_INTERNAL_SERVER_ERROR, "Erreur de transfert de fichier");
+    delete ctx;
+    vTaskDelete(NULL);
+    return;
   }
   buffer[bytes_received] = '\0';
 
   char *pasv_start = strchr(buffer, '(');
   if (!pasv_start) {
     ESP_LOGE(TAG, "Format PASV incorrect");
-    goto end_transfer;
+    // Clean up and exit
+    free(buffer);
+    close(ftp_sock);
+    httpd_resp_send_err(ctx->req, HTTPD_500_INTERNAL_SERVER_ERROR, "Erreur de transfert de fichier");
+    delete ctx;
+    vTaskDelete(NULL);
+    return;
   }
   
   int ip[4], port[2];
@@ -236,7 +255,13 @@ void FTPHTTPProxy::file_transfer_task(void* param) {
   data_sock = socket(AF_INET, SOCK_STREAM, 0);
   if (data_sock < 0) {
     ESP_LOGE(TAG, "Échec de création du socket de données");
-    goto end_transfer;
+    // Clean up and exit
+    free(buffer);
+    close(ftp_sock);
+    httpd_resp_send_err(ctx->req, HTTPD_500_INTERNAL_SERVER_ERROR, "Erreur de transfert de fichier");
+    delete ctx;
+    vTaskDelete(NULL);
+    return;
   }
   
   int flag = 1;
@@ -254,7 +279,14 @@ void FTPHTTPProxy::file_transfer_task(void* param) {
   
   if (connect(data_sock, (struct sockaddr *)&data_addr, sizeof(data_addr)) != 0) {
     ESP_LOGE(TAG, "Échec de connexion au port de données: %d", errno);
-    goto end_transfer;
+    // Clean up and exit
+    free(buffer);
+    close(data_sock);
+    close(ftp_sock);
+    httpd_resp_send_err(ctx->req, HTTPD_500_INTERNAL_SERVER_ERROR, "Erreur de transfert de fichier");
+    delete ctx;
+    vTaskDelete(NULL);
+    return;
   }
 
   snprintf(buffer, buffer_size, "RETR %s\r\n", ctx->remote_path.c_str());
@@ -263,7 +295,14 @@ void FTPHTTPProxy::file_transfer_task(void* param) {
   bytes_received = recv(ftp_sock, buffer, buffer_size - 1, 0);
   if (bytes_received <= 0 || !strstr(buffer, "150 ")) {
     ESP_LOGE(TAG, "Fichier non trouvé ou inaccessible");
-    goto end_transfer;
+    // Clean up and exit
+    free(buffer);
+    close(data_sock);
+    close(ftp_sock);
+    httpd_resp_send_err(ctx->req, HTTPD_500_INTERNAL_SERVER_ERROR, "Erreur de transfert de fichier");
+    delete ctx;
+    vTaskDelete(NULL);
+    return;
   }
   
   ESP_LOGI(TAG, "Téléchargement du fichier %s démarré", ctx->remote_path.c_str());
@@ -282,7 +321,7 @@ void FTPHTTPProxy::file_transfer_task(void* param) {
     esp_err_t err = httpd_resp_send_chunk(ctx->req, buffer, bytes_received);
     if (err != ESP_OK) {
       ESP_LOGE(TAG, "Échec d'envoi au client: %d", err);
-      goto end_transfer;
+      break;
     }
     
     if (total_bytes_transferred % (1024 * 1024) == 0) {
@@ -308,7 +347,7 @@ void FTPHTTPProxy::file_transfer_task(void* param) {
     ESP_LOGW(TAG, "Fin de transfert incomplète ou inattendue");
   }
 
-end_transfer:
+  // Cleanup code - formerly the end_transfer label
   if (buffer) {
     free(buffer);
   }
