@@ -15,6 +15,7 @@
 #include <string>
 #include "esp_timer.h"
 #include "esp_check.h"
+#include <cctype> // Pour std::tolower
 
 #ifndef HTTPD_410_GONE
 #define HTTPD_410_GONE ((httpd_err_code_t)410)
@@ -42,6 +43,7 @@ void FTPHTTPProxy::loop() {
     return;
   }
 
+  // Supprimer les liens de partage expirés
   int64_t now = esp_timer_get_time() / 1000000;
   active_shares_.erase(
     std::remove_if(
@@ -68,6 +70,7 @@ void FTPHTTPProxy::create_share_link(const std::string &path, int expiry_hours) 
     return;
   }
   
+  // Générer un token aléatoire
   uint32_t random_value = esp_random();
   char token[16];
   snprintf(token, sizeof(token), "%08x", random_value);
@@ -84,74 +87,160 @@ void FTPHTTPProxy::create_share_link(const std::string &path, int expiry_hours) 
 }
 
 bool FTPHTTPProxy::connect_to_ftp(int& sock, const char* server, const char* username, const char* password) {
-  struct hostent *ftp_host = gethostbyname(server);
-  if (!ftp_host) {
-    ESP_LOGE(TAG, "Échec de la résolution DNS");
+  if (!server || !username || !password) {
+    ESP_LOGE(TAG, "Paramètres FTP invalides");
     return false;
   }
 
+  // Résolution DNS
+  struct hostent *ftp_host = gethostbyname(server);
+  if (!ftp_host) {
+    ESP_LOGE(TAG, "Échec de la résolution DNS pour %s: %d", server, h_errno);
+    return false;
+  }
+
+  // Création du socket
   sock = socket(AF_INET, SOCK_STREAM, 0);
   if (sock < 0) {
     ESP_LOGE(TAG, "Échec de création du socket : %d", errno);
     return false;
   }
 
+  // Configuration des options du socket
   int flag = 1;
-  setsockopt(sock, SOL_SOCKET, SO_KEEPALIVE, &flag, sizeof(flag));
+  if (setsockopt(sock, SOL_SOCKET, SO_KEEPALIVE, &flag, sizeof(flag)) < 0) {
+    ESP_LOGW(TAG, "Échec de configuration SO_KEEPALIVE: %d", errno);
+  }
+  
   int rcvbuf = 16384;
-  setsockopt(sock, SOL_SOCKET, SO_RCVBUF, &rcvbuf, sizeof(rcvbuf));
+  if (setsockopt(sock, SOL_SOCKET, SO_RCVBUF, &rcvbuf, sizeof(rcvbuf)) < 0) {
+    ESP_LOGW(TAG, "Échec de configuration SO_RCVBUF: %d", errno);
+  }
 
   struct timeval timeout = {.tv_sec = 10, .tv_usec = 0};
-  setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
-  setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout));
+  if (setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout)) < 0) {
+    ESP_LOGW(TAG, "Échec de configuration SO_RCVTIMEO: %d", errno);
+  }
+  
+  if (setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout)) < 0) {
+    ESP_LOGW(TAG, "Échec de configuration SO_SNDTIMEO: %d", errno);
+  }
 
+  // Connexion au serveur FTP
   struct sockaddr_in server_addr;
   memset(&server_addr, 0, sizeof(server_addr));
   server_addr.sin_family = AF_INET;
-  server_addr.sin_port = htons(21);
-  server_addr.sin_addr.s_addr = *((unsigned long *)ftp_host->h_addr);
+  server_addr.sin_port = htons(21);  // Port FTP standard
+  
+  // S'assurer que l'adresse est correctement assignée
+  if (ftp_host->h_addrtype == AF_INET && ftp_host->h_addr_list[0] != NULL) {
+    memcpy(&server_addr.sin_addr, ftp_host->h_addr_list[0], sizeof(struct in_addr));
+  } else {
+    ESP_LOGE(TAG, "Format d'adresse hôte non pris en charge");
+    close(sock);
+    sock = -1;
+    return false;
+  }
 
   if (connect(sock, (struct sockaddr *)&server_addr, sizeof(server_addr)) != 0) {
-    ESP_LOGE(TAG, "Échec de connexion FTP : %d", errno);
+    ESP_LOGE(TAG, "Échec de connexion FTP à %s : %d", server, errno);
     close(sock);
     sock = -1;
     return false;
   }
 
+  // Réception du message de bienvenue
   char buffer[512];
   int bytes_received = recv(sock, buffer, sizeof(buffer) - 1, 0);
-  if (bytes_received <= 0 || !strstr(buffer, "220 ")) {
-    ESP_LOGE(TAG, "Message de bienvenue FTP non reçu");
+  if (bytes_received <= 0) {
+    ESP_LOGE(TAG, "Pas de réponse du serveur FTP: %d", errno);
     close(sock);
     sock = -1;
     return false;
   }
+  
   buffer[bytes_received] = '\0';
+  if (!strstr(buffer, "220 ")) {
+    ESP_LOGE(TAG, "Message de bienvenue FTP non reconnu: %s", buffer);
+    close(sock);
+    sock = -1;
+    return false;
+  }
 
+  // Envoi du nom d'utilisateur
   snprintf(buffer, sizeof(buffer), "USER %s\r\n", username);
-  send(sock, buffer, strlen(buffer), 0);
+  if (send(sock, buffer, strlen(buffer), 0) <= 0) {
+    ESP_LOGE(TAG, "Échec d'envoi de la commande USER: %d", errno);
+    close(sock);
+    sock = -1;
+    return false;
+  }
+  
   bytes_received = recv(sock, buffer, sizeof(buffer) - 1, 0);
+  if (bytes_received <= 0) {
+    ESP_LOGE(TAG, "Pas de réponse à la commande USER: %d", errno);
+    close(sock);
+    sock = -1;
+    return false;
+  }
   buffer[bytes_received] = '\0';
+  
+  // Certains serveurs peuvent directement accepter l'utilisateur sans mot de passe
+  if (strstr(buffer, "230 ")) {
+    // Déjà authentifié
+    ESP_LOGI(TAG, "Authentification FTP réussie sans mot de passe");
+  } else if (!strstr(buffer, "331 ")) {
+    ESP_LOGE(TAG, "Réponse USER inattendue: %s", buffer);
+    close(sock);
+    sock = -1;
+    return false;
+  } else {
+    // Envoi du mot de passe
+    snprintf(buffer, sizeof(buffer), "PASS %s\r\n", password);
+    if (send(sock, buffer, strlen(buffer), 0) <= 0) {
+      ESP_LOGE(TAG, "Échec d'envoi de la commande PASS: %d", errno);
+      close(sock);
+      sock = -1;
+      return false;
+    }
+    
+    bytes_received = recv(sock, buffer, sizeof(buffer) - 1, 0);
+    if (bytes_received <= 0) {
+      ESP_LOGE(TAG, "Pas de réponse à la commande PASS: %d", errno);
+      close(sock);
+      sock = -1;
+      return false;
+    }
+    buffer[bytes_received] = '\0';
+    
+    if (!strstr(buffer, "230 ")) {
+      ESP_LOGE(TAG, "Authentification FTP échouée: %s", buffer);
+      close(sock);
+      sock = -1;
+      return false;
+    }
+  }
 
-  snprintf(buffer, sizeof(buffer), "PASS %s\r\n", password);
-  send(sock, buffer, strlen(buffer), 0);
+  // Passage en mode binaire
+  if (send(sock, "TYPE I\r\n", 8, 0) <= 0) {
+    ESP_LOGE(TAG, "Échec d'envoi de la commande TYPE I: %d", errno);
+    close(sock);
+    sock = -1;
+    return false;
+  }
+  
   bytes_received = recv(sock, buffer, sizeof(buffer) - 1, 0);
-  buffer[bytes_received] = '\0';
-  if (!strstr(buffer, "230 ")) {
-    ESP_LOGE(TAG, "Authentification FTP échouée: %s", buffer);
+  if (bytes_received <= 0 || !strstr(buffer, "200 ")) {
+    ESP_LOGE(TAG, "Échec du passage en mode binaire: %s", buffer);
     close(sock);
     sock = -1;
     return false;
   }
 
-  send(sock, "TYPE I\r\n", 8, 0);
-  bytes_received = recv(sock, buffer, sizeof(buffer) - 1, 0);
-  buffer[bytes_received] = '\0';
-
+  ESP_LOGI(TAG, "Connexion FTP établie avec succès");
   return true;
 }
 
-// Fonction file_transfer_task modifiée avec les améliorations demandées
 void FTPHTTPProxy::file_transfer_task(void* param) {
   FileTransferContext* ctx = (FileTransferContext*)param;
   if (!ctx) {
@@ -161,7 +250,7 @@ void FTPHTTPProxy::file_transfer_task(void* param) {
   }
   
   // S'inscrire au watchdog
-  esp_task_wdt_add(NULL);
+  ESP_ERROR_CHECK_WITHOUT_ABORT(esp_task_wdt_add(NULL));
   
   ESP_LOGI(TAG, "Démarrage du transfert pour %s", ctx->remote_path.c_str());
   
@@ -171,13 +260,13 @@ void FTPHTTPProxy::file_transfer_task(void* param) {
   bool success = false;
   int bytes_received = 0;
 
-  // Augmentation de la taille du buffer
+  // Taille du buffer de transfert
   const int buffer_size = 16384;
   
   // Allocation plus sûre avec gestion d'erreur
   char* buffer = nullptr;
   
-  // Tenter d'abord d'allouer en SPIRAM
+  // Tenter d'abord d'allouer en SPIRAM si disponible
   buffer = (char*)heap_caps_malloc(buffer_size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
   
   // Si l'allocation SPIRAM échoue, essayer la mémoire interne
@@ -186,27 +275,38 @@ void FTPHTTPProxy::file_transfer_task(void* param) {
     
     // Si toutes les allocations échouent, abandonner proprement
     if (!buffer) {
-      ESP_LOGE(TAG, "Échec d'allocation pour le buffer");
-      httpd_resp_send_err(ctx->req, HTTPD_500_INTERNAL_SERVER_ERROR, "Erreur de transfert de fichier");
+      ESP_LOGE(TAG, "Échec d'allocation pour le buffer de transfert");
+      httpd_resp_send_err(ctx->req, HTTPD_500_INTERNAL_SERVER_ERROR, "Erreur mémoire");
       delete ctx;
-      esp_task_wdt_delete(NULL);  // Se désinscrire du watchdog
+      ESP_ERROR_CHECK_WITHOUT_ABORT(esp_task_wdt_delete(NULL));
       vTaskDelete(NULL);
       return;
     }
+  }
+
+  // Vérifier la validité du chemin de fichier
+  if (ctx->remote_path.empty()) {
+    ESP_LOGE(TAG, "Chemin de fichier distant vide");
+    free(buffer);
+    httpd_resp_send_err(ctx->req, HTTPD_404_NOT_FOUND, "Fichier non spécifié");
+    delete ctx;
+    ESP_ERROR_CHECK_WITHOUT_ABORT(esp_task_wdt_delete(NULL));
+    vTaskDelete(NULL);
+    return;
   }
 
   // Vérifier que la connexion FTP est réussie
   if (!proxy_instance.connect_to_ftp(ftp_sock, ctx->ftp_server.c_str(), ctx->username.c_str(), ctx->password.c_str())) {
     ESP_LOGE(TAG, "Échec de connexion FTP");
     free(buffer);
-    httpd_resp_send_err(ctx->req, HTTPD_500_INTERNAL_SERVER_ERROR, "Erreur de transfert de fichier");
+    httpd_resp_send_err(ctx->req, HTTPD_500_INTERNAL_SERVER_ERROR, "Erreur de connexion au serveur FTP");
     delete ctx;
-    esp_task_wdt_delete(NULL);  // Se désinscrire du watchdog
+    ESP_ERROR_CHECK_WITHOUT_ABORT(esp_task_wdt_delete(NULL));
     vTaskDelete(NULL);
     return;
   }
 
-  // Définition du type MIME pour le fichier FLAC (ajout manquant dans le code original)
+  // Définition du type MIME en fonction de l'extension
   std::string extension;
   size_t dot_pos = ctx->remote_path.find_last_of('.');
   if (dot_pos != std::string::npos) {
@@ -221,7 +321,7 @@ void FTPHTTPProxy::file_transfer_task(void* param) {
     httpd_resp_set_type(ctx->req, "audio/wav");
   } else if (extension == ".ogg") {
     httpd_resp_set_type(ctx->req, "audio/ogg");
-  } else if (extension == ".flac") {  // Ajout du support pour FLAC
+  } else if (extension == ".flac") {
     httpd_resp_set_type(ctx->req, "audio/flac");
   } else if (extension == ".mp4") {
     httpd_resp_set_type(ctx->req, "video/mp4");
@@ -232,6 +332,7 @@ void FTPHTTPProxy::file_transfer_task(void* param) {
   } else if (extension == ".png") {
     httpd_resp_set_type(ctx->req, "image/png");
   } else {
+    // Forcer le téléchargement pour les types inconnus
     httpd_resp_set_type(ctx->req, "application/octet-stream");
     std::string filename = ctx->remote_path;
     size_t slash_pos = ctx->remote_path.find_last_of('/');
@@ -242,19 +343,29 @@ void FTPHTTPProxy::file_transfer_task(void* param) {
     httpd_resp_set_hdr(ctx->req, "Content-Disposition", header.c_str());
   }
   
-  // Activer explicitement le mode chunked
+  // Activer explicitement le mode chunked pour les gros fichiers
   httpd_resp_set_hdr(ctx->req, "Transfer-Encoding", "chunked");
 
   // Passer en mode passif et récupérer les paramètres de connexion de données
-  send(ftp_sock, "PASV\r\n", 6, 0);
-  bytes_received = recv(ftp_sock, buffer, buffer_size - 1, 0);
-  if (bytes_received <= 0) {
-    ESP_LOGE(TAG, "Erreur de réception en mode passif");
+  if (send(ftp_sock, "PASV\r\n", 6, 0) <= 0) {
+    ESP_LOGE(TAG, "Échec d'envoi de la commande PASV: %d", errno);
     free(buffer);
     close(ftp_sock);
     httpd_resp_send_err(ctx->req, HTTPD_500_INTERNAL_SERVER_ERROR, "Erreur de transfert de fichier");
     delete ctx;
-    esp_task_wdt_delete(NULL);  // Se désinscrire du watchdog
+    ESP_ERROR_CHECK_WITHOUT_ABORT(esp_task_wdt_delete(NULL));
+    vTaskDelete(NULL);
+    return;
+  }
+  
+  bytes_received = recv(ftp_sock, buffer, buffer_size - 1, 0);
+  if (bytes_received <= 0) {
+    ESP_LOGE(TAG, "Erreur de réception en mode passif: %d", errno);
+    free(buffer);
+    close(ftp_sock);
+    httpd_resp_send_err(ctx->req, HTTPD_500_INTERNAL_SERVER_ERROR, "Erreur de transfert de fichier");
+    delete ctx;
+    ESP_ERROR_CHECK_WITHOUT_ABORT(esp_task_wdt_delete(NULL));
     vTaskDelete(NULL);
     return;
   }
@@ -267,19 +378,20 @@ void FTPHTTPProxy::file_transfer_task(void* param) {
     close(ftp_sock);
     httpd_resp_send_err(ctx->req, HTTPD_500_INTERNAL_SERVER_ERROR, "Erreur de transfert de fichier");
     delete ctx;
-    esp_task_wdt_delete(NULL);  // Se désinscrire du watchdog
+    ESP_ERROR_CHECK_WITHOUT_ABORT(esp_task_wdt_delete(NULL));
     vTaskDelete(NULL);
     return;
   }
 
+  // Analyse de la réponse PASV pour extraire l'adresse IP et le port
   char *pasv_start = strchr(buffer, '(');
   if (!pasv_start) {
-    ESP_LOGE(TAG, "Format PASV incorrect");
+    ESP_LOGE(TAG, "Format PASV incorrect: parenthèse non trouvée");
     free(buffer);
     close(ftp_sock);
     httpd_resp_send_err(ctx->req, HTTPD_500_INTERNAL_SERVER_ERROR, "Erreur de transfert de fichier");
     delete ctx;
-    esp_task_wdt_delete(NULL);  // Se désinscrire du watchdog
+    ESP_ERROR_CHECK_WITHOUT_ABORT(esp_task_wdt_delete(NULL));
     vTaskDelete(NULL);
     return;
   }
@@ -291,38 +403,49 @@ void FTPHTTPProxy::file_transfer_task(void* param) {
     close(ftp_sock);
     httpd_resp_send_err(ctx->req, HTTPD_500_INTERNAL_SERVER_ERROR, "Erreur de transfert de fichier");
     delete ctx;
-    esp_task_wdt_delete(NULL);  // Se désinscrire du watchdog
+    ESP_ERROR_CHECK_WITHOUT_ABORT(esp_task_wdt_delete(NULL));
     vTaskDelete(NULL);
     return;
   }
   
   int data_port = port[0] * 256 + port[1];
   
+  // Création du socket de données
   data_sock = socket(AF_INET, SOCK_STREAM, 0);
   if (data_sock < 0) {
-    ESP_LOGE(TAG, "Échec de création du socket de données");
+    ESP_LOGE(TAG, "Échec de création du socket de données: %d", errno);
     free(buffer);
     close(ftp_sock);
     httpd_resp_send_err(ctx->req, HTTPD_500_INTERNAL_SERVER_ERROR, "Erreur de transfert de fichier");
     delete ctx;
-    esp_task_wdt_delete(NULL);  // Se désinscrire du watchdog
+    ESP_ERROR_CHECK_WITHOUT_ABORT(esp_task_wdt_delete(NULL));
     vTaskDelete(NULL);
     return;
   }
   
-  int flag = 1;
-  setsockopt(data_sock, SOL_SOCKET, SO_KEEPALIVE, &flag, sizeof(flag));
-  int rcvbuf = 32768;
-  setsockopt(data_sock, SOL_SOCKET, SO_RCVBUF, &rcvbuf, sizeof(rcvbuf));
-  struct timeval data_timeout = {.tv_sec = 15, .tv_usec = 0};  // Délai augmenté
-  setsockopt(data_sock, SOL_SOCKET, SO_RCVTIMEO, &data_timeout, sizeof(data_timeout));
+  // Configuration des options du socket de données
+  flag = 1;
+  if (setsockopt(data_sock, SOL_SOCKET, SO_KEEPALIVE, &flag, sizeof(flag)) < 0) {
+    ESP_LOGW(TAG, "Échec de configuration SO_KEEPALIVE pour data_sock: %d", errno);
+  }
   
+  int rcvbuf = 32768;
+  if (setsockopt(data_sock, SOL_SOCKET, SO_RCVBUF, &rcvbuf, sizeof(rcvbuf)) < 0) {
+    ESP_LOGW(TAG, "Échec de configuration SO_RCVBUF pour data_sock: %d", errno);
+  }
+  
+  struct timeval data_timeout = {.tv_sec = 15, .tv_usec = 0};  // Délai augmenté
+  if (setsockopt(data_sock, SOL_SOCKET, SO_RCVTIMEO, &data_timeout, sizeof(data_timeout)) < 0) {
+    ESP_LOGW(TAG, "Échec de configuration SO_RCVTIMEO pour data_sock: %d", errno);
+  }
+  
+  // Connexion au port de données
   struct sockaddr_in data_addr;
   memset(&data_addr, 0, sizeof(data_addr));
   data_addr.sin_family = AF_INET;
   data_addr.sin_port = htons(data_port);
   
-  // Correction du problème d'adresse IP, utilisation de inet_addr
+  // Utilisation de inet_addr pour définir l'adresse IP
   char ip_str[16];
   snprintf(ip_str, sizeof(ip_str), "%d.%d.%d.%d", ip[0], ip[1], ip[2], ip[3]);
   data_addr.sin_addr.s_addr = inet_addr(ip_str);
@@ -334,24 +457,12 @@ void FTPHTTPProxy::file_transfer_task(void* param) {
     close(ftp_sock);
     httpd_resp_send_err(ctx->req, HTTPD_500_INTERNAL_SERVER_ERROR, "Erreur de transfert de fichier");
     delete ctx;
-    esp_task_wdt_delete(NULL);  // Se désinscrire du watchdog
+    ESP_ERROR_CHECK_WITHOUT_ABORT(esp_task_wdt_delete(NULL));
     vTaskDelete(NULL);
     return;
   }
 
   // Envoi de la commande RETR pour récupérer le fichier
-  if (ctx->remote_path.empty()) {
-    ESP_LOGE(TAG, "Chemin de fichier distant vide");
-    free(buffer);
-    close(data_sock);
-    close(ftp_sock);
-    httpd_resp_send_err(ctx->req, HTTPD_404_NOT_FOUND, "Fichier non spécifié");
-    delete ctx;
-    esp_task_wdt_delete(NULL);  // Se désinscrire du watchdog
-    vTaskDelete(NULL);
-    return;
-  }
-
   snprintf(buffer, buffer_size, "RETR %s\r\n", ctx->remote_path.c_str());
   int sent = send(ftp_sock, buffer, strlen(buffer), 0);
   if (sent <= 0) {
@@ -361,7 +472,7 @@ void FTPHTTPProxy::file_transfer_task(void* param) {
     close(ftp_sock);
     httpd_resp_send_err(ctx->req, HTTPD_500_INTERNAL_SERVER_ERROR, "Erreur de transfert de fichier");
     delete ctx;
-    esp_task_wdt_delete(NULL);  // Se désinscrire du watchdog
+    ESP_ERROR_CHECK_WITHOUT_ABORT(esp_task_wdt_delete(NULL));
     vTaskDelete(NULL);
     return;
   }
@@ -375,21 +486,21 @@ void FTPHTTPProxy::file_transfer_task(void* param) {
     close(ftp_sock);
     httpd_resp_send_err(ctx->req, HTTPD_500_INTERNAL_SERVER_ERROR, "Erreur de transfert de fichier");
     delete ctx;
-    esp_task_wdt_delete(NULL);  // Se désinscrire du watchdog
+    ESP_ERROR_CHECK_WITHOUT_ABORT(esp_task_wdt_delete(NULL));
     vTaskDelete(NULL);
     return;
   }
   
   buffer[bytes_received] = '\0';
   
-  if (!strstr(buffer, "150 ")) {
+  if (!strstr(buffer, "150 ") && !strstr(buffer, "125 ")) {
     ESP_LOGE(TAG, "Fichier non trouvé ou inaccessible: %s", buffer);
     free(buffer);
     close(data_sock);
     close(ftp_sock);
     httpd_resp_send_err(ctx->req, HTTPD_404_NOT_FOUND, "Fichier non trouvé ou inaccessible");
     delete ctx;
-    esp_task_wdt_delete(NULL);  // Se désinscrire du watchdog
+    ESP_ERROR_CHECK_WITHOUT_ABORT(esp_task_wdt_delete(NULL));
     vTaskDelete(NULL);
     return;
   }
@@ -403,27 +514,31 @@ void FTPHTTPProxy::file_transfer_task(void* param) {
   // Définir la taille des chunks plus petite pour les gros fichiers
   const int chunk_size = 4096;  // Plus petit que buffer_size
   
+  // Boucle de transfert de données
   while (true) {
     // Réinitialiser le watchdog régulièrement
-    esp_task_wdt_reset();
+    ESP_ERROR_CHECK_WITHOUT_ABORT(esp_task_wdt_reset());
     
     bytes_received = recv(data_sock, buffer, buffer_size, 0);
     if (bytes_received <= 0) {
       if (bytes_received < 0 && errno != EAGAIN && errno != EWOULDBLOCK) {
         ESP_LOGE(TAG, "Erreur de réception des données: %d", errno);
+      } else {
+        // Fin normale du fichier
+        ESP_LOGI(TAG, "Fin du transfert de données");
       }
       break;
     }
     
     total_bytes_transferred += bytes_received;
     
-    // Vérification de la mémoire disponible avec un seuil plus élevé
+    // Vérification de la mémoire disponible
     if (esp_get_free_heap_size() < 15000) {
       ESP_LOGW(TAG, "Mémoire critique: %d octets", esp_get_free_heap_size());
-      vTaskDelay(pdMS_TO_TICKS(50));  // Pause plus longue
+      vTaskDelay(pdMS_TO_TICKS(50));  // Pause pour permettre la libération de mémoire
     }
     
-    // Envoyer en petits chunks au lieu d'un gros
+    // Envoyer en petits chunks au lieu d'un gros chunk
     if (bytes_received > chunk_size) {
       for (int i = 0; i < bytes_received; i += chunk_size) {
         int current_chunk = std::min(chunk_size, bytes_received - i);
@@ -439,15 +554,15 @@ void FTPHTTPProxy::file_transfer_task(void* param) {
     }
     
     if (err != ESP_OK) {
-      ESP_LOGE(TAG, "Échec d'envoi au client: %s", esp_err_to_name(err));
+      ESP_LOGE(TAG, "Échec d'envoi au client HTTP: %s", esp_err_to_name(err));
       break;
     }
     
-    // Après un certain volume de données, afficher le progrès et réinitialiser le watchdog
+    // Afficher le progrès périodiquement
     if (total_bytes_transferred % (256 * 1024) == 0) {
       ESP_LOGI(TAG, "Transfert en cours: %.2f MB", total_bytes_transferred / (1024.0 * 1024.0));
-      esp_task_wdt_reset();  // Réinitialiser le watchdog
-      vTaskDelay(pdMS_TO_TICKS(5));  // Petit délai
+      ESP_ERROR_CHECK_WITHOUT_ABORT(esp_task_wdt_reset());  // Réinitialiser le watchdog
+      vTaskDelay(pdMS_TO_TICKS(5));  // Petit délai pour éviter la saturation
     }
   }
   
@@ -461,7 +576,7 @@ void FTPHTTPProxy::file_transfer_task(void* param) {
   bytes_received = recv(ftp_sock, buffer, buffer_size - 1, 0);
   if (bytes_received > 0) {
     buffer[bytes_received] = '\0';
-    if (strstr(buffer, "226 ")) {
+    if (strstr(buffer, "226 ") || strstr(buffer, "250 ")) {
       ESP_LOGI(TAG, "Transfert terminé avec succès: %.2f KB (%.2f MB)", 
                total_bytes_transferred / 1024.0,
                total_bytes_transferred / (1024.0 * 1024.0));
@@ -473,7 +588,7 @@ void FTPHTTPProxy::file_transfer_task(void* param) {
     ESP_LOGW(TAG, "Pas de réponse de fin de transfert du serveur FTP");
   }
 
-  // Nettoyage
+  // Nettoyage des ressources
   if (buffer) {
     free(buffer);
     buffer = nullptr;
@@ -485,20 +600,19 @@ void FTPHTTPProxy::file_transfer_task(void* param) {
     ftp_sock = -1;
   }
   
+  // Finalisation de la réponse HTTP
   if (!success) {
     httpd_resp_send_err(ctx->req, HTTPD_500_INTERNAL_SERVER_ERROR, "Erreur de transfert de fichier");
   } else {
+    // Terminer le mode chunked
     httpd_resp_send_chunk(ctx->req, NULL, 0);
   }
   
   // Libération sécurisée du contexte
-  if (ctx) {
-    delete ctx;
-    ctx = nullptr;
-  }
+  delete ctx;
   
   // Se désinscrire du watchdog avant de terminer
-  esp_task_wdt_delete(NULL);
+  ESP_ERROR_CHECK_WITHOUT_ABORT(esp_task_wdt_delete(NULL));
   
   vTaskDelete(NULL);
 }
@@ -507,7 +621,6 @@ bool FTPHTTPProxy::list_ftp_directory(const std::string &dir_path, httpd_req_t *
   int ftp_sock = -1;
   int data_sock = -1;
   char buffer[1024];
-  char *pasv_start = nullptr;
   int data_port = 0;
   int ip[4], port[2];
   int bytes_received;
