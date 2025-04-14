@@ -183,6 +183,7 @@ void FTPHTTPProxy::file_transfer_task(void* param) {
   int ftp_sock = -1;
   int data_sock = -1;
   bool success = false;
+  int bytes_received = 0;  // Déclaration déplacée vers le début de la fonction
 
   // Allocation du buffer avec PSRAM si disponible
   bool has_psram = heap_caps_get_free_size(MALLOC_CAP_SPIRAM) > 0;
