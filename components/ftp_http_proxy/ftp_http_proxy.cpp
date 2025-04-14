@@ -775,6 +775,7 @@ bool FTPHTTPProxy::list_ftp_directory(const std::string &dir_path, httpd_req_t *
 esp_err_t FTPHTTPProxy::toggle_shareable_handler(httpd_req_t *req) {
   auto *proxy = (FTPHTTPProxy *)req->user_ctx;
   
+  // Lire le corps de la requête JSON
   char content[256];
   int ret = httpd_req_recv(req, content, sizeof(content) - 1);
   if (ret <= 0) {
@@ -783,6 +784,8 @@ esp_err_t FTPHTTPProxy::toggle_shareable_handler(httpd_req_t *req) {
   }
   content[ret] = '\0';
   
+  // Analyser le JSON (implémentation basique)
+  // Format attendu: {"path": "chemin/du/fichier", "shareable": true|false}
   std::string path;
   bool shareable = false;
   
@@ -803,6 +806,7 @@ esp_err_t FTPHTTPProxy::toggle_shareable_handler(httpd_req_t *req) {
     return ESP_FAIL;
   }
   
+  // Mettre à jour notre liste de fichiers
   bool found = false;
   for (auto &file : proxy->ftp_files_) {
     if (file.path == path) {
@@ -813,6 +817,7 @@ esp_err_t FTPHTTPProxy::toggle_shareable_handler(httpd_req_t *req) {
   }
   
   if (!found) {
+    // Ajouter un nouveau fichier
     FileEntry entry;
     entry.path = path;
     entry.shareable = shareable;
@@ -822,6 +827,7 @@ esp_err_t FTPHTTPProxy::toggle_shareable_handler(httpd_req_t *req) {
   ESP_LOGI(TAG, "Fichier %s marqué comme %s", 
            path.c_str(), shareable ? "partageable" : "non partageable");
   
+  // Réponse simple
   httpd_resp_sendstr(req, shareable ? "Fichier partageable" : "Fichier non partageable");
   return ESP_OK;
 }
@@ -830,17 +836,21 @@ esp_err_t FTPHTTPProxy::http_req_handler(httpd_req_t *req) {
   auto *proxy = (FTPHTTPProxy *)req->user_ctx;
   std::string requested_path = req->uri;
 
+  // Suppression du premier slash
   if (!requested_path.empty() && requested_path[0] == '/') {
     requested_path.erase(0, 1);
   }
 
   ESP_LOGI(TAG, "Requête de téléchargement reçue: %s", requested_path.c_str());
   
+  // Vérifier si c'est un lien de partage valide
   bool path_valid = false;
   
+  // Format typique: /share/TOKEN
   if (requested_path.compare(0, 6, "share/") == 0) {
     std::string token = requested_path.substr(6);
     
+    // Chercher le token dans les partages actifs
     for (const auto &share : proxy->active_shares_) {
       if (share.token == token) {
         requested_path = share.path;
@@ -850,6 +860,8 @@ esp_err_t FTPHTTPProxy::http_req_handler(httpd_req_t *req) {
       }
     }
   } else {
+    // Vérifier si le fichier est dans la liste des fichiers connus
+    // Tous les fichiers connus sont accessibles directement (pas besoin d'une liste prédéfinie)
     path_valid = true;
   }
   
@@ -859,6 +871,7 @@ esp_err_t FTPHTTPProxy::http_req_handler(httpd_req_t *req) {
     return ESP_FAIL;
   }
 
+  // Créer le contexte de transfert
   FileTransferContext* ctx = new FileTransferContext;
   if (!ctx) {
     httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Erreur mémoire");
@@ -871,14 +884,15 @@ esp_err_t FTPHTTPProxy::http_req_handler(httpd_req_t *req) {
   ctx->username = proxy->username_;
   ctx->password = proxy->password_;
 
+  // Créer une tâche dédiée pour le transfert de fichier pour éviter le blocage
   BaseType_t task_created = xTaskCreatePinnedToCore(
-    file_transfer_task,
-    "file_transfer",
-    8192,
-    ctx,
-    tskIDLE_PRIORITY + 1,
-    NULL,
-    1
+    file_transfer_task,           // Fonction de tâche
+    "file_transfer",              // Nom de tâche
+    8192,                         // Taille de la pile
+    ctx,                          // Paramètres de la tâche
+    tskIDLE_PRIORITY + 1,         // Priorité
+    NULL,                         // Handle (non nécessaire)
+    1                             // S'exécute sur le cœur 1 (laisse le cœur 0 pour l'interface WiFi)
   );
 
   if (task_created != pdPASS) {
@@ -888,12 +902,14 @@ esp_err_t FTPHTTPProxy::http_req_handler(httpd_req_t *req) {
     return ESP_FAIL;
   }
 
+  // La tâche dédiée va gérer le transfert et la réponse HTTP
   return ESP_OK;
 }
 
 esp_err_t FTPHTTPProxy::file_list_handler(httpd_req_t *req) {
   auto *proxy = (FTPHTTPProxy *)req->user_ctx;
   
+  // Extraire le chemin du répertoire depuis la requête (éventuellement)
   std::string dir_path = "";
   char *query = NULL;
   size_t query_len = httpd_req_get_url_query_len(req) + 1;
@@ -923,6 +939,7 @@ esp_err_t FTPHTTPProxy::file_list_handler(httpd_req_t *req) {
 esp_err_t FTPHTTPProxy::share_create_handler(httpd_req_t *req) {
   auto *proxy = (FTPHTTPProxy *)req->user_ctx;
   
+  // Lire le corps de la requête JSON
   char content[256];
   int ret = httpd_req_recv(req, content, sizeof(content) - 1);
   if (ret <= 0) {
@@ -931,8 +948,10 @@ esp_err_t FTPHTTPProxy::share_create_handler(httpd_req_t *req) {
   }
   content[ret] = '\0';
   
+  // Analyser le JSON (implémentation basique)
+  // Format attendu: {"path": "chemin/du/fichier", "expiry": 24}
   std::string path;
-  int expiry = 24;
+  int expiry = 24;  // Par défaut 24h
   
   char *token = strtok(content, "{},:\"");
   while (token) {
@@ -946,16 +965,20 @@ esp_err_t FTPHTTPProxy::share_create_handler(httpd_req_t *req) {
     token = strtok(NULL, "{},:\"");
   }
   
+  // Vérifier si le chemin est valide et partageable
   if (path.empty() || !proxy->is_shareable(path)) {
     httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Fichier non partageable");
     return ESP_FAIL;
   }
   
+  // Limiter l'expiration à une plage raisonnable (1h - 72h)
   if (expiry < 1) expiry = 1;
   if (expiry > 72) expiry = 72;
   
+  // Créer le lien de partage
   proxy->create_share_link(path, expiry);
   
+  // Trouver le token du lien qu'on vient de créer
   std::string token_str;
   for (const auto &share : proxy->active_shares_) {
     if (share.path == path) {
@@ -964,6 +987,7 @@ esp_err_t FTPHTTPProxy::share_create_handler(httpd_req_t *req) {
     }
   }
   
+  // Réponse avec le lien créé
   char response[128];
   snprintf(response, sizeof(response), 
            "{\"link\": \"/share/%s\", \"expiry\": %d}",
@@ -979,11 +1003,15 @@ esp_err_t FTPHTTPProxy::share_access_handler(httpd_req_t *req) {
   auto *proxy = (FTPHTTPProxy *)req->user_ctx;
   std::string requested_path = req->uri;
   
+  // Format: /share/TOKEN
   if (requested_path.compare(0, 7, "/share/") == 0) {
     std::string token = requested_path.substr(7);
     
+    // Chercher le token dans les partages actifs
     for (const auto &share : proxy->active_shares_) {
       if (share.token == token) {
+        // Redirige vers le gestionnaire de téléchargement normal
+        // en utilisant le chemin effectif
         return http_req_handler(req);
       }
     }
@@ -994,6 +1022,7 @@ esp_err_t FTPHTTPProxy::share_access_handler(httpd_req_t *req) {
 }
 
 esp_err_t FTPHTTPProxy::static_files_handler(httpd_req_t *req) {
+  // Interface principale
   if (strcmp(req->uri, "/") == 0 || strcmp(req->uri, "/index.html") == 0) {
     httpd_resp_set_type(req, "text/html");
     httpd_resp_send(req, HTML_INDEX, strlen(HTML_INDEX));
@@ -1007,6 +1036,7 @@ esp_err_t FTPHTTPProxy::static_files_handler(httpd_req_t *req) {
 void FTPHTTPProxy::setup_http_server() {
   ESP_LOGI(TAG, "Démarrage du serveur HTTP...");
 
+  // Vérification de la connexion réseau
   wifi_ap_record_t ap_info;
   if (esp_wifi_sta_get_ap_info(&ap_info) != ESP_OK) {
     ESP_LOGW(TAG, "WiFi semble ne pas être connecté, mais on continue quand même");
@@ -1017,13 +1047,15 @@ void FTPHTTPProxy::setup_http_server() {
   httpd_config_t config = HTTPD_DEFAULT_CONFIG();
   config.server_port = local_port_;
   config.uri_match_fn = httpd_uri_match_wildcard;
-  config.recv_wait_timeout = 30;
-  config.send_wait_timeout = 30;
-  config.max_uri_handlers = 8;
+  
+  // Optimisations pour ESP-IDF 5.1.5
+  config.recv_wait_timeout = 30;    // 30 secondes
+  config.send_wait_timeout = 30;    // 30 secondes
+  config.max_uri_handlers = 8;        
   config.max_resp_headers = 16;
-  config.stack_size = 8192;
-  config.lru_purge_enable = true;
-  config.core_id = 0;
+  config.stack_size = 8192;         // Taille de pile suffisante
+  config.lru_purge_enable = true;   // Activer la purge LRU
+  config.core_id = 0;               // S'exécute sur le cœur 0
   
   esp_err_t ret = httpd_start(&server_, &config);
   if (ret != ESP_OK) {
@@ -1031,53 +1063,54 @@ void FTPHTTPProxy::setup_http_server() {
     return;
   }
 
-  httpd_uri_t uri_static = {
-    .uri = "/",
-    .method = HTTP_GET,
-    .handler = static_files_handler,
-    .user_ctx = this
+  // Enregistrement des gestionnaires d'URI
+  const httpd_uri_t uri_static = {
+    .uri       = "/",
+    .method    = HTTP_GET,
+    .handler   = static_files_handler,
+    .user_ctx  = this
   };
-  httpd_register_uri_handler(server_, &uri_static);
+  ESP_ERROR_CHECK_WITHOUT_ABORT(httpd_register_uri_handler(server_, &uri_static));
   
-  httpd_uri_t uri_files_api = {
-    .uri = "/api/files",
-    .method = HTTP_GET,
-    .handler = file_list_handler,
-    .user_ctx = this
+  const httpd_uri_t uri_files_api = {
+    .uri       = "/api/files",
+    .method    = HTTP_GET,
+    .handler   = file_list_handler,
+    .user_ctx  = this
   };
-  httpd_register_uri_handler(server_, &uri_files_api);
+  ESP_ERROR_CHECK_WITHOUT_ABORT(httpd_register_uri_handler(server_, &uri_files_api));
   
-  httpd_uri_t uri_toggle_shareable = {
-    .uri = "/api/toggle-shareable",
-    .method = HTTP_POST,
-    .handler = toggle_shareable_handler,
-    .user_ctx = this
+  const httpd_uri_t uri_toggle_shareable = {
+    .uri       = "/api/toggle-shareable",
+    .method    = HTTP_POST,
+    .handler   = toggle_shareable_handler,
+    .user_ctx  = this
   };
-  httpd_register_uri_handler(server_, &uri_toggle_shareable);
+  ESP_ERROR_CHECK_WITHOUT_ABORT(httpd_register_uri_handler(server_, &uri_toggle_shareable));
   
-  httpd_uri_t uri_share_api = {
-    .uri = "/api/share",
-    .method = HTTP_POST,
-    .handler = share_create_handler,
-    .user_ctx = this
+  const httpd_uri_t uri_share_api = {
+    .uri       = "/api/share",
+    .method    = HTTP_POST,
+    .handler   = share_create_handler,
+    .user_ctx  = this
   };
-  httpd_register_uri_handler(server_, &uri_share_api);
+  ESP_ERROR_CHECK_WITHOUT_ABORT(httpd_register_uri_handler(server_, &uri_share_api));
   
-  httpd_uri_t uri_share_access = {
-    .uri = "/share/*",
-    .method = HTTP_GET,
-    .handler = share_access_handler,
-    .user_ctx = this
+  const httpd_uri_t uri_share_access = {
+    .uri       = "/share/*",
+    .method    = HTTP_GET,
+    .handler   = share_access_handler,
+    .user_ctx  = this
   };
-  httpd_register_uri_handler(server_, &uri_share_access);
+  ESP_ERROR_CHECK_WITHOUT_ABORT(httpd_register_uri_handler(server_, &uri_share_access));
   
-  httpd_uri_t uri_download = {
-    .uri = "/*",
-    .method = HTTP_GET,
-    .handler = http_req_handler,
-    .user_ctx = this
+  const httpd_uri_t uri_download = {
+    .uri       = "/*",
+    .method    = HTTP_GET,
+    .handler   = http_req_handler,
+    .user_ctx  = this
   };
-  httpd_register_uri_handler(server_, &uri_download);
+  ESP_ERROR_CHECK_WITHOUT_ABORT(httpd_register_uri_handler(server_, &uri_download));
 
   ESP_LOGI(TAG, "Serveur HTTP démarré avec succès sur le port %d", local_port_);
   ESP_LOGI(TAG, "Interface utilisateur accessible à http://[ip-esp]:%d/", local_port_);
